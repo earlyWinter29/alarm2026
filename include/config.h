@@ -26,6 +26,12 @@
 #define GMT_OFFSET_SEC 3600      // Offset per l'Italia (CET) -> 1 ora = 3600 secondi
 #define DAYLIGHT_OFFSET_SEC 3600 // Offset per l'Ora Legale (CEST) -> 1 ora = 3600 secondi
 
+// --- PRESENZA TELEFONO (BLE) ---
+// Ogni 15 minuti cerca il telefono (IRK in src/secrets.h). Se non c'è, deep sleep
+// per altri 15 minuti senza aggiornare orologio né sensori.
+#define PRESENCE_INTERVAL_S 900     // Intervallo tra due controlli (secondi)
+#define PRESENCE_SCAN_MS 8000       // Durata massima di una scansione (si ferma appena lo trova)
+
 // --- PIN I2C (DS3231 RTC, BME280 Ambiente) ---
 #define I2C_SDA 32
 #define I2C_SCL 22

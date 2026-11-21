@@ -558,3 +558,11 @@ Al fine di modernizzare l'interfaccia utente superando i limiti dei font base e 
 - **Nuovo modulo `lib/logic`:** logica pura senza Arduino (batteria, prossima sveglia, finestra suoneria, snooze, curve LED/volume, macchina a stati pulsanti, decisione refresh UI, timeout del loop). I moduli hardware la richiamano.
 - **Deduplicazione:** menù (B corto/lungo condividono `changeSetting`/`editAlarm`), NTP (`applyNtpTime`), ora locale da RTC (`rtcLocalTime`), spegnimento WiFi; rimosso codice morto (`scanI2C`, `printTime`, `printEnvironment`, `displayFullRefresh`, `displayPartialRefresh`, `rtc_setupAlarm1_EveryMinute`).
 - **Test:** `pio test -e native` (vedi `test/README`), `python3 tools/check_size.py` per il peso. Log seriali, chiavi NVS e comportamento invariati.
+
+## Presenza telefono via BLE (20 Novembre 2026)
+- Ogni 15 minuti (`PRESENCE_INTERVAL_S`), da fermi sulla Home senza LED né A2DP, scansione BLE passiva fino a 8 s (`PRESENCE_SCAN_MS`) che si ferma al primo annuncio del telefono.
+- Il telefono annuncia indirizzi casuali (RPA): si riconoscono con il suo IRK (`PHONE_IRK` in `src/secrets.h`, gitignored). `rpaMatch()` in `lib/logic` (AES-128 puro, testato con FIPS-197 e il vettore `ah` del Bluetooth Core) prova l'IRK in entrambi gli ordini di byte e il log dice quale combacia.
+- Telefono assente: Allarme 1 (cambio minuto) disattivato, LED/amplificatore/pin display in hold, display in hibernate, deep sleep 15 min. Al risveglio dal timer `setup()` cerca solo il telefono e, se non c'è, torna a dormire senza toccare orologio, sensori o display.
+- Restano attivi in deep sleep: Allarme 2 (sveglie, EXT0) e Tasto B (EXT1). Il Tasto A (GPIO 21) non è un pin RTC e non può svegliare dal deep sleep.
+- Sicurezze: un tasto premuto fa ripartire i 15 minuti; senza almeno un avvistamento dal cold boot (IRK sbagliato) non va mai in deep sleep; se lo stack BT non parte il telefono conta come presente.
+- Modulo hardware: `lib/presence` (Bluedroid GAP, accende e spegne solo ciò che non era già acceso). Peso: +4336 B.

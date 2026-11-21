@@ -82,3 +82,7 @@ void displayTestText(const char* text) {
     } while (display.nextPage());
     display.hibernate();
 }
+
+void displayHibernate() {
+    display.hibernate();
+}

@@ -20,6 +20,7 @@
 #include "secrets.h" // Credenziali WiFi
 #include "alarm.h"
 #include "menu.h"
+#include "presence.h"
 
 // --- VARIABILI GLOBALI ---
 int64_t lastActivityTime = 0;
@@ -27,6 +28,14 @@ int64_t lastActivityTime = 0;
 // Stato globale: caricato da NVS al cold boot, RTC_DATA_ATTR lo conserva in RAM RTC durante lo sleep
 RTC_DATA_ATTR SystemState appState;
 bool ledState = false;
+
+// --- PRESENZA TELEFONO (BLE) ---
+// In RTC RAM: sopravvivono al deep sleep, si azzerano solo al cold boot.
+RTC_DATA_ATTR bool presenceAway = false;        // In deep sleep perché il telefono non c'era
+RTC_DATA_ATTR bool presenceEverSeen = false;    // Telefono trovato almeno una volta da questo avvio
+RTC_DATA_ATTR uint32_t presenceLastCheck = 0;   // Epoch UTC dell'ultimo controllo (0 = da fissare)
+static bool presenceActivity = false;           // Tasto premuto dopo l'ultimo controllo
+static bool presenceForceFull = false;          // Rientro dal deep sleep: display reinizializzato
 
 void print_wakeup_reason() {
   esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
@@ -205,6 +214,80 @@ static bool alarmShouldRing() {
     return shouldRing;
 }
 
+static bool presenceConfigured() {
+    for (uint8_t b : PHONE_IRK) if (b) return true;
+    return false;
+}
+
+// Scansione BLE del telefono. Se lo stack BT non parte lo considera presente:
+// meglio un orologio acceso in più che uno spento con qualcuno in casa.
+static bool phoneNearby() {
+    PresenceResult r = presenceScan(PHONE_IRK, PRESENCE_SCAN_MS);
+    if (r.error) {
+        Serial.printf("[PRESENCE] Errore stack BLE dopo %lums: considero il telefono presente.\n", (unsigned long)r.elapsedMs);
+        return true;
+    }
+    if (r.found) {
+        Serial.printf("[PRESENCE] Telefono trovato in %lums (RSSI %d dBm, IRK %s). Heap libero %u B\n",
+                      (unsigned long)r.elapsedMs, r.rssi, r.irkOrder == 1 ? "diretto" : "invertito", ESP.getFreeHeap());
+    } else {
+        Serial.printf("[PRESENCE] Telefono assente (%u annunci BLE in %lums). Heap libero %u B\n",
+                      r.adverts, (unsigned long)r.elapsedMs, ESP.getFreeHeap());
+    }
+    return r.found;
+}
+
+// Telefono assente: deep sleep di PRESENCE_INTERVAL_S. Orologio e sensori fermi,
+// il display tiene l'ultima immagine. Svegliano il timer, le sveglie e il Tasto B.
+// preparePins = false quando i pin sono ancora in hold dal deep sleep precedente.
+static void enterAway(bool preparePins) {
+    presenceAway = true;
+    if (preparePins) {
+        // Niente cambio minuto dall'RTC: resta solo l'Allarme 2 delle sveglie
+        rtc.disableAlarm(1);
+        rtc.clearAlarm(1);
+
+        led_off(false);
+        ledcDetachPin(LED_PWM_PIN);
+        pinMode(LED_PWM_PIN, OUTPUT);
+        digitalWrite(LED_PWM_PIN, LOW);
+        setAudioEnabled(false); // Amplificatore spento
+        displayHibernate();
+
+        // In deep sleep i pin non pilotati fluttuano: congela LED e amplificatore
+        // spenti e i pin del display come li trova setup()
+        const uint8_t held[] = {LED_PWM_PIN, I2S_SD_MODE, EPD_PWR, EPD_CS, EPD_RST, EPD_DC};
+        for (uint8_t pin : held) gpio_hold_en((gpio_num_t)pin);
+        gpio_deep_sleep_hold_en();
+    }
+    Serial.printf("[PRESENCE] Deep sleep per %us (sveglie e Tasto B restano attivi)\n", PRESENCE_INTERVAL_S);
+    enterAwaySleep(PRESENCE_INTERVAL_S);
+}
+
+// Ogni PRESENCE_INTERVAL_S, da fermi sulla Home, cerca il telefono.
+// Un tasto premuto vale come "presente" e fa ripartire l'intervallo.
+static void presenceCheck(uint32_t nowUtc) {
+    if (!presenceConfigured()) return;
+    if (presenceActivity || presenceLastCheck == 0) {
+        presenceActivity = false;
+        presenceLastCheck = nowUtc;
+        return;
+    }
+    if (!presenceCheckDue(nowUtc, presenceLastCheck, PRESENCE_INTERVAL_S)) return;
+    presenceLastCheck = nowUtc;
+
+    if (phoneNearby()) {
+        presenceEverSeen = true;
+        return;
+    }
+    // IRK sbagliato = telefono mai trovato: non spegnere l'orologio per sempre
+    if (!presenceEverSeen) {
+        Serial.println("[PRESENCE] Telefono mai visto da questo avvio: resto attivo (IRK giusto?)");
+        return;
+    }
+    enterAway(true); // Non ritorna
+}
+
 void performWakeupTasks(esp_sleep_wakeup_cause_t wakeup_reason) {
   bool wokeUpForMinuteUpdate = false;
   bool wokeUpForAlarm = false;
@@ -284,7 +367,8 @@ void performWakeupTasks(esp_sleep_wakeup_cause_t wakeup_reason) {
   ui_init();
 
   bool isColdBoot = (wakeup_reason == ESP_SLEEP_WAKEUP_UNDEFINED);
-  ui_update(appState, isColdBoot || forceFullRefresh);
+  ui_update(appState, isColdBoot || forceFullRefresh || presenceForceFull);
+  presenceForceFull = false;
 
   if (wokeUpForMinuteUpdate) {
       // Menù aperto o luce accesa: niente sleep immediato
@@ -292,6 +376,7 @@ void performWakeupTasks(esp_sleep_wakeup_cause_t wakeup_reason) {
           Serial.println("Risveglio minore (cambio minuto): imposto timeout immediato per il Light Sleep.");
           if (!appState.bluetoothEnabled) {
               lastActivityTime = esp_timer_get_time() - INACTIVITY_TIMEOUT_US - 100000LL;
+              presenceCheck(currentTimeSeconds); // Telefono assente: deep sleep, non ritorna
           }
       } else {
           Serial.println("Cambio minuto durante l'uso: mantengo il timeout di inattività normale.");
@@ -312,17 +397,37 @@ void setup() {
   Serial.println("Avvio back-end Sveglia...");
   watchdog_init();
 
+  // Telefono assente: al risveglio dal timer cerca solo il telefono. Se non c'è
+  // torna subito in deep sleep: niente display, orologio, sensori né I2C.
+  // I pin restano in hold dal giro precedente.
+  if (presenceAway) {
+      if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+          Serial.println("[PRESENCE] Risveglio dal deep sleep: cerco il telefono...");
+          if (!phoneNearby()) enterAway(false); // Non ritorna
+          presenceEverSeen = true;
+      }
+      // Telefono trovato, sveglia (EXT0) o Tasto B (EXT1): si riaccende tutto
+      Serial.println("[PRESENCE] Ritorno al funzionamento normale.");
+      presenceAway = false;
+      presenceLastCheck = 0;
+      presenceForceFull = true;
+  }
+
   // CRITICO: pin del display a OUTPUT/HIGH PRIMA di rilasciare l'hold,
   // altrimenti cadono LOW per qualche ms e tagliano l'alimentazione del pannello
   pinMode(EPD_PWR, OUTPUT); digitalWrite(EPD_PWR, HIGH);
   pinMode(EPD_CS, OUTPUT);  digitalWrite(EPD_CS, HIGH);
   pinMode(EPD_RST, OUTPUT); digitalWrite(EPD_RST, HIGH);
   pinMode(EPD_DC, OUTPUT);  digitalWrite(EPD_DC, HIGH);
+  pinMode(LED_PWM_PIN, OUTPUT); digitalWrite(LED_PWM_PIN, LOW);  // LED spento
+  pinMode(I2S_SD_MODE, OUTPUT); digitalWrite(I2S_SD_MODE, LOW);  // Amplificatore spento
 
   gpio_hold_dis((gpio_num_t)EPD_RST);
   gpio_hold_dis((gpio_num_t)EPD_CS);
   gpio_hold_dis((gpio_num_t)EPD_DC);
   gpio_hold_dis((gpio_num_t)EPD_PWR);
+  gpio_hold_dis((gpio_num_t)LED_PWM_PIN);
+  gpio_hold_dis((gpio_num_t)I2S_SD_MODE);
   gpio_deep_sleep_hold_dis();
 
   print_wakeup_reason();
@@ -387,6 +492,7 @@ void loop() {
       performWakeupTasks(ESP_SLEEP_WAKEUP_GPIO);
   } else if (event != INPUT_NONE) {
       lastActivityTime = esp_timer_get_time();
+      presenceActivity = true; // Qualcuno c'è: il prossimo controllo slitta
       Serial.printf("[INPUT] Evento: %d (Home:%d Menu:%d) ora %02d:%02d\n", event, appState.currentScreen == SCREEN_HOME, appState.currentScreen == SCREEN_MENU, appState.hour, appState.minute);
       handleMenu(appState, event);
       ui_update(appState);

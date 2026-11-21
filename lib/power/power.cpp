@@ -43,3 +43,23 @@ void enterDeepSleep(uint64_t sleep_seconds) {
     // Entra in Deep Sleep!
     esp_deep_sleep_start();
 }
+
+void enterAwaySleep(uint32_t sleepSeconds) {
+    esp_sleep_enable_timer_wakeup((uint64_t)sleepSeconds * 1000000ULL);
+
+    // Sveglie: l'INT del DS3231 scende a LOW quando scatta l'Allarme 2
+    rtc_gpio_pullup_en((gpio_num_t)RTC_INT_PIN);
+    rtc_gpio_pulldown_dis((gpio_num_t)RTC_INT_PIN);
+    esp_sleep_enable_ext0_wakeup((gpio_num_t)RTC_INT_PIN, 0);
+
+    // Tasto B da solo: ALL_LOW con un solo pin = "B premuto"
+    rtc_gpio_pullup_en((gpio_num_t)BTN_B_PIN);
+    rtc_gpio_pulldown_dis((gpio_num_t)BTN_B_PIN);
+    esp_sleep_enable_ext1_wakeup(1ULL << BTN_B_PIN, ESP_EXT1_WAKEUP_ALL_LOW);
+
+    // Pull-up RTC attivi durante il deep sleep
+    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+
+    Serial.flush();
+    esp_deep_sleep_start();
+}

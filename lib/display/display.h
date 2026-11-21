@@ -13,4 +13,7 @@ void initDisplay();
 // Scrive un testo di prova sul display
 void displayTestText(const char* text);
 
+// Mette il pannello in deep sleep (l'immagine resta). Dopo serve initDisplay().
+void displayHibernate();
+
 #endif // DISPLAY_H

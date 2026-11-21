@@ -82,4 +82,18 @@ struct ButtonFsm {
     }
 };
 
+// --- Presenza telefono (BLE) -----------------------------------------------
+// AES-128, solo cifratura (FIPS-197): è la funzione e() del Bluetooth Core.
+void aes128Encrypt(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]);
+// Il telefono annuncia indirizzi casuali (RPA) che cambiano ogni ~15 min:
+// solo chi ha il suo IRK riconosce che sono suoi (Core Vol 3 Part H 2.2.2).
+// addr: 6 byte, il più significativo per primo (come lo riporta Bluedroid).
+// irk: 16 byte; viene provato anche in ordine inverso, perché macOS lo salva
+// nell'ordine in cui viaggia via radio.
+// Ritorna 1 se combacia l'IRK diretto, 2 se quello invertito, 0 se nessuno.
+uint8_t rpaMatch(const uint8_t irk[16], const uint8_t addr[6]);
+// Vero se sono passati almeno intervalS secondi dall'ultimo controllo
+// (o se l'orologio è tornato indietro dopo una sincronizzazione NTP).
+bool presenceCheckDue(uint32_t nowUtc, uint32_t lastCheckUtc, uint32_t intervalS);
+
 #endif // LOGIC_H

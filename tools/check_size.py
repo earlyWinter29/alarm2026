@@ -10,7 +10,8 @@ import os
 import sys
 
 # Byte di firmware.bin dopo l'ottimizzazione (prima: 1835888)
-BUDGET = 1832032
+# +4336 B: presenza telefono via BLE (scansione GAP + AES per gli indirizzi RPA)
+BUDGET = 1836368
 APP_PARTITION = 2000 * 1024  # partitions.csv: app0 2000K
 
 path = sys.argv[1] if len(sys.argv) > 1 else ".pio/build/esp32dev/firmware.bin"

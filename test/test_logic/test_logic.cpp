@@ -269,6 +269,57 @@ static void test_loop_sleep_matches_original() {
     TEST_ASSERT_EQUAL_UINT32(0, loopSleepMs(31000000LL, 0, s, false));   // scaduto
 }
 
+// --- Presenza telefono (BLE) -------------------------------------------------
+
+static void test_aes128_fips197_vector() {
+    const uint8_t key[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                             0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+    const uint8_t in[16] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff};
+    const uint8_t expected[16] = {0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30,
+                                  0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4, 0xc5, 0x5a};
+    uint8_t out[16];
+    aes128Encrypt(key, in, out);
+    TEST_ASSERT_EQUAL_HEX8_ARRAY(expected, out, 16);
+}
+
+// Bluetooth Core, Vol 3 Part H, D.7: ah(IRK, 0x708194) = 0x0dfbaa
+static const uint8_t SPEC_IRK[16] = {0xec, 0x02, 0x34, 0xa3, 0x57, 0xc8, 0xad, 0x05,
+                                     0x34, 0x10, 0x10, 0xa6, 0x0a, 0x39, 0x7d, 0x9b};
+
+static void test_rpa_matches_spec_vector() {
+    const uint8_t addr[6] = {0x70, 0x81, 0x94, 0x0d, 0xfb, 0xaa};
+    TEST_ASSERT_EQUAL_UINT8(1, rpaMatch(SPEC_IRK, addr));
+
+    uint8_t reversed[16];
+    for (int i = 0; i < 16; i++) reversed[i] = SPEC_IRK[15 - i];
+    TEST_ASSERT_EQUAL_UINT8(2, rpaMatch(reversed, addr)); // IRK come lo salva macOS
+}
+
+static void test_rpa_rejects_other_addresses() {
+    const uint8_t wrongHash[6] = {0x70, 0x81, 0x94, 0x0d, 0xfb, 0xab};
+    TEST_ASSERT_EQUAL_UINT8(0, rpaMatch(SPEC_IRK, wrongHash));
+    // Stesso hash ma bit di tipo da indirizzo statico (11) o non risolvibile (00)
+    const uint8_t staticAddr[6] = {0xf0, 0x81, 0x94, 0x0d, 0xfb, 0xaa};
+    const uint8_t nonResolvable[6] = {0x30, 0x81, 0x94, 0x0d, 0xfb, 0xaa};
+    TEST_ASSERT_EQUAL_UINT8(0, rpaMatch(SPEC_IRK, staticAddr));
+    TEST_ASSERT_EQUAL_UINT8(0, rpaMatch(SPEC_IRK, nonResolvable));
+    // Un altro IRK non risolve l'indirizzo
+    uint8_t otherIrk[16];
+    memcpy(otherIrk, SPEC_IRK, 16);
+    otherIrk[7] ^= 0x01;
+    const uint8_t addr[6] = {0x70, 0x81, 0x94, 0x0d, 0xfb, 0xaa};
+    TEST_ASSERT_EQUAL_UINT8(0, rpaMatch(otherIrk, addr));
+}
+
+static void test_presence_check_due() {
+    TEST_ASSERT_FALSE(presenceCheckDue(1000, 1000, 900));
+    TEST_ASSERT_FALSE(presenceCheckDue(1899, 1000, 900));
+    TEST_ASSERT_TRUE(presenceCheckDue(1900, 1000, 900));
+    TEST_ASSERT_TRUE(presenceCheckDue(5000, 1000, 900));
+    TEST_ASSERT_TRUE(presenceCheckDue(999, 1000, 900)); // Orologio tornato indietro
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_battery_examples);
@@ -284,5 +335,9 @@ int main(int, char**) {
     RUN_TEST(test_menu_item_count);
     RUN_TEST(test_ui_decision_matches_original);
     RUN_TEST(test_loop_sleep_matches_original);
+    RUN_TEST(test_aes128_fips197_vector);
+    RUN_TEST(test_rpa_matches_spec_vector);
+    RUN_TEST(test_rpa_rejects_other_addresses);
+    RUN_TEST(test_presence_check_due);
     return UNITY_END();
 }
